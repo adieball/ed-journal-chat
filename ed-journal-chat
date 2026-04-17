@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""ED Journal Chat — native Linux console reader for Elite Dangerous chat."""
+
+import json
+import os
+import sys
+import tty
+import termios
+import threading
+import subprocess
+import time
+from pathlib import Path
+from datetime import datetime
+
+JOURNAL_PATH = Path.home() / "Nextcloud/Apps/Elite Dangerous/Journal Files/Elite Dangerous"
+
+# ANSI colours matching the original Windows app
+ANSI = {
+    "local":        "\033[33m",   # Yellow
+    "player":       "\033[33m",   # DarkYellow
+    "wing":         "\033[36m",   # Cyan
+    "starsystem":   "\033[31m",   # DarkRed
+    "squadron":     "\033[32m",   # Green
+    "squadleaders": "\033[32m",   # Green
+    "voicechat":    "\033[35m",   # Magenta
+    "chat":         "\033[34m",   # Blue  (multicrew)
+}
+CHANNEL_NAMES = {
+    "chat":         "multicrew",
+    "local":        "local",
+    "starsystem":   "system",
+    "wing":         "team",
+    "squadron":     "squadron",
+    "squadleaders": "squad leaders",
+    "voicechat":    "voicechat",
+    "player":       "direct",
+}
+RESET = "\033[0m"
+
+# --- Mutable state ---------------------------------------------------------
+
+state = {
+    "cmdr_name":     None,
+    "fsd_target":    None,
+    "last_sent":     None,
+    "last_received": None,
+}
+
+lines_read = 0          # how many lines of the active journal we have processed
+active_journal = None
+
+# The watcher thread checks this flag; set it to pause output while in help mode
+_watcher_paused = threading.Event()
+
+# ---- Clipboard ------------------------------------------------------------
+
+def set_clipboard(text: str | None) -> None:
+    if not text:
+        return
+    # Prefer Wayland-native wl-copy, fall back to xclip via XWayland
+    for cmd in (["wl-copy"], ["xclip", "-selection", "clipboard"]):
+        try:
+            subprocess.run(cmd, input=text.encode(), timeout=3, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+    print("Warning: clipboard failed — install wl-clipboard or xclip")
+
+# ---- Journal parsing ------------------------------------------------------
+
+def _fmt_ts(ts_str: str) -> str:
+    try:
+        return datetime.fromisoformat(ts_str.rstrip("Z")).strftime("%H:%M:%S")
+    except (ValueError, AttributeError):
+        return ""
+
+
+def _handle_entry(entry: dict) -> None:
+    """Dispatch a single parsed journal entry."""
+    event = entry.get("event", "")
+    ts = _fmt_ts(entry.get("timestamp", ""))
+
+    if event == "Fileheader":
+        odyssey = entry.get("Odyssey", False)
+        mode = "Live" if odyssey else "Legacy"
+        print(f"This is {mode} version {entry.get('gameversion','')} build {entry.get('build','')}")
+
+    elif event == "Commander":
+        if state["cmdr_name"] is None:
+            state["cmdr_name"] = entry.get("Name", "")
+            print(f"CMDR {state['cmdr_name']} ({entry.get('FID','')})")
+
+    elif event == "FSDTarget":
+        state["fsd_target"] = entry.get("Name", "")
+
+    elif event == "SendText":
+        if entry.get("Sent", False):
+            channel = entry.get("To", "")
+            color = ANSI.get(channel, ANSI["player"])
+            name = state["cmdr_name"] or "Me"
+            state["last_sent"] = entry.get("Message", "")
+            print(f"{color}{ts} - {name}:\t{state['last_sent']}{RESET}")
+
+    elif event == "ReceiveText":
+        channel = entry.get("Channel")
+        if channel == "npc":
+            return
+        color = ANSI.get(channel, ANSI["chat"]) if channel else ANSI["chat"]
+        state["last_received"] = entry.get("Message", "")
+        print(f"{color}{ts} - {entry.get('From','')}:\t{state['last_received']}{RESET}")
+
+    elif event == "Friends":
+        status = entry.get("Status", "")
+        name = entry.get("Name", "")
+        if status == "Requested":
+            print(f"{ts} - friend request from {name}")
+        elif status == "Added":
+            print(f"{ts} - now friends with {name}")
+
+    elif event == "WingInvite":
+        print(f"{ts} - team invite from {entry.get('Name','')}")
+
+    elif event == "Shutdown":
+        print(f"{ts} - Game Closed")
+
+
+def parse_journal(path: str) -> None:
+    """Read any new lines from the journal file and process them."""
+    global lines_read
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for i, raw in enumerate(fh):
+                if i < lines_read:
+                    continue
+                lines_read += 1
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    _handle_entry(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    except (FileNotFoundError, PermissionError) as exc:
+        print(f"Error reading journal: {exc}")
+
+
+def _watch_loop(path: str) -> None:
+    """Background thread: poll for journal file growth and parse new lines."""
+    last_size = -1
+    while True:
+        if _watcher_paused.is_set():
+            time.sleep(0.2)
+            continue
+        try:
+            size = os.path.getsize(path)
+            if size != last_size:
+                last_size = size
+                parse_journal(path)
+        except FileNotFoundError:
+            pass
+        time.sleep(0.5)
+
+# ---- Journal file selection -----------------------------------------------
+
+def select_journal() -> str:
+    os.system("clear")
+
+    h4 = sorted(JOURNAL_PATH.glob("Journal.????-??-??T??????.??.log"),
+                key=lambda p: p.stat().st_mtime, reverse=True)[:5]
+    h3 = sorted(JOURNAL_PATH.glob("Journal.????????????.??.log"),
+                key=lambda p: p.stat().st_mtime, reverse=True)[:5]
+
+    print("'Live' journals\n")
+    for i, f in enumerate(h4):
+        print(f"  [{i}] {f.name}")
+
+    print("\n\n'Legacy' journals\n")
+    for j, f in enumerate(h3):
+        print(f"  [{len(h4) + j}] {f.name}")
+
+    print()
+    choice = input("Select the journal file to use: ").strip()
+
+    try:
+        idx = int(choice)
+    except ValueError:
+        return select_journal()
+
+    total = len(h4) + len(h3)
+    if idx < 0 or idx >= total:
+        return select_journal()
+
+    chosen = h4[idx] if idx < len(h4) else h3[idx - len(h4)]
+    os.system("clear")
+    return str(chosen)
+
+# ---- Help display ---------------------------------------------------------
+
+_help_mode = False
+
+def toggle_help() -> None:
+    global _help_mode, lines_read
+
+    _help_mode = not _help_mode
+
+    if _help_mode:
+        _watcher_paused.set()
+        os.system("clear")
+        print("  'q'\t\tclose the program")
+        print("  [space]\tcopy target system to clipboard")
+        print("  's'\t\tcopy last sent message to clipboard")
+        print("  'r'\t\tcopy last received message to clipboard")
+        print("  'h'\t\topen and close this help page")
+        print()
+        print("Chat colours:")
+        for channel, color in ANSI.items():
+            name = CHANNEL_NAMES.get(channel, channel)
+            print(f"  {color}{name}{RESET}")
+    else:
+        os.system("clear")
+        lines_read = 0
+        parse_journal(active_journal)
+        _watcher_paused.clear()
+
+# ---- Raw keyboard input ---------------------------------------------------
+
+def _getch() -> str:
+    """Read one character without waiting for Enter."""
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        return sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+# ---- Main -----------------------------------------------------------------
+
+def main() -> None:
+    global active_journal
+
+    if not JOURNAL_PATH.exists():
+        print(f"Journal directory not found:\n  {JOURNAL_PATH}", file=sys.stderr)
+        sys.exit(1)
+
+    active_journal = select_journal()
+
+    print("Press 'h' for Help!\n")
+    parse_journal(active_journal)
+
+    watcher = threading.Thread(target=_watch_loop, args=(active_journal,), daemon=True)
+    watcher.start()
+
+    while True:
+        ch = _getch()
+
+        # Erase the echoed character
+        sys.stdout.write("\r   \r")
+        sys.stdout.flush()
+
+        if ch == 'q':
+            break
+        elif ch == ' ':
+            if state["fsd_target"]:
+                set_clipboard(state["fsd_target"])
+                print(f"Copied system to clipboard: {state['fsd_target']}")
+            else:
+                print("No targeted system found!")
+        elif ch in ('s', 'ы'):
+            set_clipboard(state["last_sent"])
+        elif ch in ('r', 'к'):
+            set_clipboard(state["last_received"])
+        elif ch == 'h':
+            toggle_help()
+
+
+if __name__ == "__main__":
+    main()
