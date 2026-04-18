@@ -69,6 +69,12 @@ def set_clipboard(text: str | None) -> None:
 
 # ---- Journal parsing ------------------------------------------------------
 
+def _print(text: str = "") -> None:
+    """Write a line with \r\n so it renders correctly even in raw-mode."""
+    sys.stdout.write(text + "\r\n")
+    sys.stdout.flush()
+
+
 def _fmt_ts(ts_str: str) -> str:
     try:
         return datetime.fromisoformat(ts_str.rstrip("Z")).strftime("%H:%M:%S")
@@ -84,12 +90,12 @@ def _handle_entry(entry: dict) -> None:
     if event == "Fileheader":
         odyssey = entry.get("Odyssey", False)
         mode = "Live" if odyssey else "Legacy"
-        print(f"This is {mode} version {entry.get('gameversion','')} build {entry.get('build','')}")
+        _print(f"This is {mode} version {entry.get('gameversion','')} build {entry.get('build','')}")
 
     elif event == "Commander":
         if state["cmdr_name"] is None:
             state["cmdr_name"] = entry.get("Name", "")
-            print(f"CMDR {state['cmdr_name']} ({entry.get('FID','')})")
+            _print(f"CMDR {state['cmdr_name']} ({entry.get('FID','')})")
 
     elif event == "FSDTarget":
         state["fsd_target"] = entry.get("Name", "")
@@ -100,7 +106,7 @@ def _handle_entry(entry: dict) -> None:
             color = ANSI.get(channel, ANSI["player"])
             name = state["cmdr_name"] or "Me"
             state["last_sent"] = entry.get("Message", "")
-            print(f"{color}{ts} - {name}: {state['last_sent']}{RESET}")
+            _print(f"{color}{ts} - {name}: {state['last_sent']}{RESET}")
 
     elif event == "ReceiveText":
         channel = entry.get("Channel")
@@ -108,21 +114,21 @@ def _handle_entry(entry: dict) -> None:
             return
         color = ANSI.get(channel, ANSI["chat"]) if channel else ANSI["chat"]
         state["last_received"] = entry.get("Message", "")
-        print(f"{color}{ts} - {entry.get('From','')}: {state['last_received']}{RESET}")
+        _print(f"{color}{ts} - {entry.get('From','')}: {state['last_received']}{RESET}")
 
     elif event == "Friends":
         status = entry.get("Status", "")
         name = entry.get("Name", "")
         if status == "Requested":
-            print(f"{ts} - friend request from {name}")
+            _print(f"{ts} - friend request from {name}")
         elif status == "Added":
-            print(f"{ts} - now friends with {name}")
+            _print(f"{ts} - now friends with {name}")
 
     elif event == "WingInvite":
-        print(f"{ts} - team invite from {entry.get('Name','')}")
+        _print(f"{ts} - team invite from {entry.get('Name','')}")
 
     elif event == "Shutdown":
-        print(f"{ts} - Game Closed")
+        _print(f"{ts} - Game Closed")
 
 
 def parse_journal(path: str) -> None:
@@ -142,7 +148,7 @@ def parse_journal(path: str) -> None:
                 except json.JSONDecodeError:
                     pass
     except (FileNotFoundError, PermissionError) as exc:
-        print(f"Error reading journal: {exc}")
+        _print(f"Error reading journal: {exc}")
 
 
 def _watch_loop(path: str) -> None:
@@ -264,9 +270,9 @@ def main() -> None:
         elif ch == ' ':
             if state["fsd_target"]:
                 set_clipboard(state["fsd_target"])
-                print(f"Copied system to clipboard: {state['fsd_target']}")
+                _print(f"Copied system to clipboard: {state['fsd_target']}")
             else:
-                print("No targeted system found!")
+                _print("No targeted system found!")
         elif ch in ('s', 'ы'):
             set_clipboard(state["last_sent"])
         elif ch in ('r', 'к'):
