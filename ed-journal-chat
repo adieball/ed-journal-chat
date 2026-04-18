@@ -100,7 +100,7 @@ def _handle_entry(entry: dict) -> None:
             color = ANSI.get(channel, ANSI["player"])
             name = state["cmdr_name"] or "Me"
             state["last_sent"] = entry.get("Message", "")
-            print(f"{color}{ts} - {name}:\t{state['last_sent']}{RESET}")
+            print(f"{color}{ts} - {name}: {state['last_sent']}{RESET}")
 
     elif event == "ReceiveText":
         channel = entry.get("Channel")
@@ -108,7 +108,7 @@ def _handle_entry(entry: dict) -> None:
             return
         color = ANSI.get(channel, ANSI["chat"]) if channel else ANSI["chat"]
         state["last_received"] = entry.get("Message", "")
-        print(f"{color}{ts} - {entry.get('From','')}:\t{state['last_received']}{RESET}")
+        print(f"{color}{ts} - {entry.get('From','')}: {state['last_received']}{RESET}")
 
     elif event == "Friends":
         status = entry.get("Status", "")
